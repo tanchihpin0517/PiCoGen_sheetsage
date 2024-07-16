@@ -601,6 +601,15 @@ def sheetsage(
     Callable[float, float]
        Metronome function for converting beat values to timestamps
     """
+    # Check mpi4py is installed manually
+    try:
+        from mpi4py import MPI
+    except ModuleNotFoundError:
+        raise ModuleNotFoundError(
+            "Please install mpi4py to use SheetSage. "
+            "You can install it via 'conda install mpi4py'."
+        )
+
     # Check values
     if segment_start_hint is not None and segment_start_hint < 0:
         raise ValueError("Segment start hint cannot be negative")

@@ -1,0 +1,12 @@
+numpy<2
+scipy
+pretty-midi
+torch
+tqdm
+validators
+pillow
+yt-dlp
+jukebox @ git+https://github.com/tanchihpin0517/mirtoolkit_jukebox.git
+madmom @ git+https://github.com/CPJKU/madmom.git
+resampy
+librosa

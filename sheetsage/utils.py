@@ -121,7 +121,7 @@ def run_cmd_sync(cmd, cwd=None, interactive=False, timeout=None):
 
 
 _RETRIEVE_AUDIO_CMD_TEMPLATE = """
-youtube-dl \
+yt-dlp \
     --no-cache-dir \
     --no-continue \
     --no-playlist \
