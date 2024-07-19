@@ -5,9 +5,8 @@ readme = "README.md"
 requires-python = ">=3.8"
 dynamic = ["dependencies"]
 
-[tool.setuptools.packages.find]
-where = ["sheetsage"]
-namespaces = false
+[tool.setuptools]
+packages = ["sheetsage"]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
