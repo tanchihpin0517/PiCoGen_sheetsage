@@ -396,4 +396,7 @@ class EncOnlyTransducer(_TransducerImpl):
         out = self.output(out)
         out = out.view(src_max_len, batch_size, -1)
 
-        return out
+        return dict(
+            logits=out,
+            last_hidden_state=src_enc,
+        )

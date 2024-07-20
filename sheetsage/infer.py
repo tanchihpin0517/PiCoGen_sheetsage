@@ -105,6 +105,7 @@ def _init_model(task, input_feats, model):
     output_dim = _TASK_TO_VOCAB_SIZE[task]
 
     if cfg["model"] == "probe":
+        raise RuntimeError("Probe model not supported")
         model = EncOnlyTransducer(
             output_dim,
             src_emb_mode="identity",
@@ -186,18 +187,20 @@ def _beat_tracking_with_hints(
         sr, audio = decode_audio(
             audio_path_or_bytes,
             offset=beat_detection_start,
-            duration=None
-            if beat_detection_end is None
-            else beat_detection_end - beat_detection_start,
+            duration=(
+                None
+                if beat_detection_end is None
+                else beat_detection_end - beat_detection_start
+            ),
         )
 
     # Run beat detection on segment
     first_downbeat_idx, beats_per_measure, beats = madmom(
         sr,
         audio,
-        beats_per_bar=beats_per_measure_hint
-        if beats_per_measure_hint is not None
-        else [3, 4],
+        beats_per_bar=(
+            beats_per_measure_hint if beats_per_measure_hint is not None else [3, 4]
+        ),
         beats_per_minute_hint=beats_per_minute_hint,
     )
     if first_downbeat_idx is None or beats_per_measure is None or len(beats) == 0:
@@ -294,6 +297,36 @@ def _beat_tracking_with_hints(
     )
 
 
+def _beat_parsing_with_hint(
+    beat_information,
+    segment_start_hint,
+    segment_end_hint,
+    segment_hints_are_downbeats,
+    beats_per_measure_hint,
+    beats_per_minute_hint,
+    beat_detection_padding,
+    legacy_behavior,
+):
+    beats_times = beat_information["beats"]
+    beats = np.array((range(len(beats_times))))
+
+    beat_to_time_fn = create_beat_to_time_fn(list(range(len(beats_times))), beats_times)
+    tertiaries = np.arange(0, len(beats_times) - 1 + 1e-6, 1 / _TERTIARIES_PER_BEAT)
+    assert tertiaries.shape[0] == (len(beats_times) - 1) * _TERTIARIES_PER_BEAT + 1
+    tertiaries_centered = tertiaries - (1 / _TERTIARIES_PER_BEAT) / 2
+    tertiaries_times = beat_to_time_fn(tertiaries_centered)
+    tertiaries_times = np.maximum(tertiaries_times, 0.0)
+    tertiaries_times = np.minimum(tertiaries_times, beats_times[-1])
+
+    # NOTE: tertiaries_times does not include the last beat
+    downbeats_times = beat_information["downbeats"]
+    downbeats = [_closest_idx(t, beats_times) for t in downbeats_times]
+    while downbeats[-1] * _TERTIARIES_PER_BEAT >= len(tertiaries_times):
+        downbeats.pop()
+
+    return beats, downbeats, beats_times, tertiaries, tertiaries_times
+
+
 def _split_into_chunks(
     tertiaries_times,
     measures_per_chunk,
@@ -338,6 +371,70 @@ def _split_into_chunks(
                     "Dynamic chunking not implemented. Try halving measures_per_chunk."
                 )
             chunks.append(chunk_slice)
+
+    return chunks
+
+
+def _split_into_chunks_dynamicly(
+    tertiaries_times,
+    downbeats,
+    measures_per_chunk,
+    segment_start_downbeat,
+    segment_end_beat,
+):
+    chunks = []
+    if downbeats[0] != 0:  # NOTE: include upbeat
+        downbeats = [0] + downbeats
+    chunk_start_tertiary = downbeats[0] * _TERTIARIES_PER_BEAT
+    accu_duration = 0
+    accu_num_measures = 0
+    for i in range(len(downbeats)):
+        measure_start_tertiary = downbeats[i] * _TERTIARIES_PER_BEAT
+        if i < len(downbeats) - 1:
+            measure_end_tertiary = downbeats[i + 1] * _TERTIARIES_PER_BEAT + 1
+        else:
+            measure_end_tertiary = len(tertiaries_times)
+        # if not measure_start_tertiary < measure_end_tertiary:
+        #     continue
+        assert measure_end_tertiary <= tertiaries_times.shape[0]
+        measure_slice = slice(measure_start_tertiary, measure_end_tertiary)
+
+        measure_tertiaries_times = tertiaries_times[measure_slice]
+        accu_duration = (
+            measure_tertiaries_times[-1] - tertiaries_times[chunk_start_tertiary]
+        )
+        accu_num_measures += 1
+
+        if accu_duration > _JUKEBOX_CHUNK_DURATION_EDGE:
+            chunks.append(slice(chunk_start_tertiary, measure_start_tertiary + 1))
+            chunk_start_tertiary = measure_start_tertiary
+            accu_duration = (
+                measure_tertiaries_times[-1] - tertiaries_times[chunk_start_tertiary]
+            )
+            accu_num_measures = 1
+
+        if accu_num_measures >= measures_per_chunk:
+            chunks.append(slice(chunk_start_tertiary, measure_end_tertiary))
+            chunk_start_tertiary = measure_end_tertiary - 1
+            accu_duration = 0
+            accu_num_measures = 0
+
+        if accu_duration > _JUKEBOX_CHUNK_DURATION_EDGE:
+            raise ValueError(
+                f"Chunk duration should not exceed {_JUKEBOX_CHUNK_DURATION_EDGE} seconds. Current chunk duration: {accu_duration}."
+            )
+
+    if accu_num_measures > 0:
+        chunk_end_tertiary = len(tertiaries_times)
+        if (
+            chunk_start_tertiary < chunk_end_tertiary - 1
+        ):  # NOTE: make sure chunk size > 1
+            chunks.append(slice(chunk_start_tertiary, chunk_end_tertiary))
+
+    assert (
+        sum([c.stop - c.start for c in chunks])
+        == len(tertiaries_times) + len(chunks) - 1
+    )
 
     return chunks
 
@@ -390,14 +487,18 @@ def _extract_features(
 
 def _transcribe_chunks(chunks_features, input_feats, detect_melody, detect_harmony):
     melody_logits = None
+    melody_last_hidden_state = None
     if detect_melody:
         melody_model = _init_model(Task.MELODY, input_feats, Model.TRANSFORMER)
         melody_logits = []
+        melody_last_hidden_state = []
 
     harmony_logits = None
+    harmony_last_hidden_state = None
     if detect_harmony:
         harmony_model = _init_model(Task.HARMONY, input_feats, Model.TRANSFORMER)
         harmony_logits = []
+        harmony_last_hidden_state = []
 
     if detect_melody or detect_harmony:
         device = torch.device("cpu")
@@ -412,13 +513,23 @@ def _transcribe_chunks(chunks_features, input_feats, detect_melody, detect_harmo
                 src_len.to(device)
 
                 if detect_melody:
-                    chunk_melody_logits = melody_model(src, src_len, None, None)
-                    chunk_melody_logits = chunk_melody_logits[: src_len.item(), 0]
-                    melody_logits.append(chunk_melody_logits.cpu().numpy())
+                    melody_output = melody_model(src, src_len, None, None)
+                    melody_output["logits"] = melody_output["logits"][
+                        : src_len.item(), 0
+                    ]
+                    melody_logits.append(melody_output["logits"].cpu().numpy())
+                    melody_last_hidden_state.append(
+                        melody_output["last_hidden_state"].cpu().numpy()
+                    )
                 if detect_harmony:
-                    chunk_harmony_logits = harmony_model(src, src_len, None, None)
-                    chunk_harmony_logits = chunk_harmony_logits[: src_len.item(), 0]
-                    harmony_logits.append(chunk_harmony_logits.cpu().numpy())
+                    harmony_output = harmony_model(src, src_len, None, None)
+                    harmony_output["logits"] = harmony_output["logits"][
+                        : src_len.item(), 0
+                    ]
+                    harmony_logits.append(harmony_output["logits"].cpu().numpy())
+                    harmony_last_hidden_state.append(
+                        harmony_output["last_hidden_state"].cpu().numpy()
+                    )
 
     total_num_tertiary = sum([c.shape[0] for c in chunks_features])
     if detect_melody:
@@ -426,7 +537,12 @@ def _transcribe_chunks(chunks_features, input_feats, detect_melody, detect_harmo
     if detect_harmony:
         assert sum([c.shape[0] for c in harmony_logits]) == total_num_tertiary
 
-    return melody_logits, harmony_logits
+    return (
+        melody_logits,
+        harmony_logits,
+        melody_last_hidden_state,
+        harmony_last_hidden_state,
+    )
 
 
 def _format_lead_sheet(
@@ -531,13 +647,16 @@ def _format_lead_sheet(
     return lead_sheet, segment_beats, beats_times
 
 
+@torch.no_grad()
 def sheetsage(
     audio_path_bytes_or_url,
     segment_start_hint=None,
     segment_end_hint=None,
     use_jukebox=False,
     measures_per_chunk=8,
+    dynamic_chunking=False,
     segment_hints_are_downbeats=False,
+    beat_information=None,
     beats_per_measure_hint=None,
     beats_per_minute_hint=None,
     detect_melody=True,
@@ -650,37 +769,73 @@ def sheetsage(
     ):
         raise FileNotFoundError(audio_path_or_bytes)
 
-    # Run beat detection
-    status_change_callback(Status.DETECTING_BEATS)
-    (
-        beats_per_measure,
-        beats,
-        beats_times,
-        tertiaries,
-        tertiaries_times,
-        segment_start_downbeat,
-        segment_end_beat,
-    ) = _beat_tracking_with_hints(
-        audio_path_or_bytes,
-        segment_start_hint,
-        segment_end_hint,
-        segment_hints_are_downbeats,
-        beats_per_measure_hint,
-        beats_per_minute_hint,
-        beat_detection_padding,
-        legacy_behavior,
-    )
+    # NOTE: If beat information is not provided, run beat detection (madmom)
+    if beat_information is not None:
+        status_change_callback(Status.DETECTING_BEATS)
+        (
+            beats,
+            downbeats,
+            beats_times,
+            tertiaries,
+            tertiaries_times,
+        ) = _beat_parsing_with_hint(
+            beat_information,
+            segment_start_hint,
+            segment_end_hint,
+            segment_hints_are_downbeats,
+            beats_per_measure_hint,
+            beats_per_minute_hint,
+            beat_detection_padding,
+            legacy_behavior,
+        )
+        beats_per_measure = None
+        segment_start_downbeat = None
+        segment_end_beat = None
+    else:
+        # TODO: Implement original beat detection
+        raise NotImplementedError("We haven't implemented this yet.")
+        # Run beat detection
+        status_change_callback(Status.DETECTING_BEATS)
+        (
+            beats_per_measure,
+            beats,
+            beats_times,
+            tertiaries,
+            tertiaries_times,
+            segment_start_downbeat,
+            segment_end_beat,
+        ) = _beat_tracking_with_hints(
+            audio_path_or_bytes,
+            segment_start_hint,
+            segment_end_hint,
+            segment_hints_are_downbeats,
+            beats_per_measure_hint,
+            beats_per_minute_hint,
+            beat_detection_padding,
+            legacy_behavior,
+        )
 
     # Identify suitable chunks for running through transcription model
-    chunks_tertiaries = _split_into_chunks(
-        tertiaries_times,
-        measures_per_chunk,
-        beats_per_measure,
-        segment_start_downbeat,
-        segment_end_beat,
-        avoid_chunking_if_possible,
-        legacy_behavior,
-    )
+    if dynamic_chunking:
+        chunks_tertiaries = _split_into_chunks_dynamicly(
+            tertiaries_times,
+            downbeats,
+            measures_per_chunk,
+            segment_start_downbeat,
+            segment_end_beat,
+        )
+    else:
+        # TODO: Implement original chunking function
+        raise NotImplementedError("We only support dynamic chunking for now.")
+        chunks_tertiaries = _split_into_chunks(
+            tertiaries_times,
+            measures_per_chunk,
+            beats_per_measure,
+            segment_start_downbeat,
+            segment_end_beat,
+            avoid_chunking_if_possible,
+            legacy_behavior,
+        )
 
     # Extract features
     status_change_callback(Status.EXTRACTING_FEATURES)
@@ -692,11 +847,22 @@ def sheetsage(
 
     # Transcribe chunks
     status_change_callback(Status.TRANSCRIBING)
-    melody_logits, harmony_logits = _transcribe_chunks(
-        chunks_features, input_feats, detect_melody, detect_harmony
-    )
+    (
+        melody_logits,
+        harmony_logits,
+        melody_last_hidden_state,
+        harmony_last_hidden_state,
+    ) = _transcribe_chunks(chunks_features, input_feats, detect_melody, detect_harmony)
 
     # Create lead sheet
+    if dynamic_chunking:
+        lead_sheet = None
+        segment_beats = None
+        segment_beats_times = None
+        beats_per_measure = downbeats[1] - downbeats[0]  # TODO: It's just a workaround
+        segment_start_downbeat = downbeats[0]
+        segment_end_beat = downbeats[-1]
+
     status_change_callback(Status.FORMATTING)
     total_num_tertiary = sum([c.shape[0] for c in chunks_features])
     lead_sheet, segment_beats, segment_beats_times = _format_lead_sheet(
@@ -712,11 +878,21 @@ def sheetsage(
         harmony_threshold=harmony_threshold,
     )
 
+    melody_last_hidden_state = np.concatenate(melody_last_hidden_state, axis=0)
+    harmony_last_hidden_state = np.concatenate(harmony_last_hidden_state, axis=0)
+
     status_change_callback(Status.DONE)
-    result = lead_sheet, segment_beats, segment_beats_times
-    if return_intermediaries:
-        result = result + (chunks_tertiaries, melody_logits, harmony_logits)
-    return result
+
+    return dict(
+        lead_sheet=lead_sheet,
+        segment_beats=segment_beats,
+        segment_beats_times=segment_beats_times,
+        chunks_tertiaries=chunks_tertiaries,
+        melody_logits=melody_logits,
+        harmony_logits=harmony_logits,
+        melody_last_hidden_state=melody_last_hidden_state,
+        harmony_last_hidden_state=harmony_last_hidden_state,
+    )
 
 
 if __name__ == "__main__":
