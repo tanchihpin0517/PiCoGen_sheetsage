@@ -729,6 +729,11 @@ def sheetsage(
             "You can install it via 'conda install mpi4py'."
         )
 
+    if return_intermediaries:
+        logging.warning(
+            "Returning intermediate results is deprecated and will be removed in a future release."
+        )
+
     # Check values
     if segment_start_hint is not None and segment_start_hint < 0:
         raise ValueError("Segment start hint cannot be negative")
@@ -856,27 +861,31 @@ def sheetsage(
 
     # Create lead sheet
     if dynamic_chunking:
+        logging.warning(
+            "Format lead sheet for dynamic chunking is not implemented currently."
+        )
         lead_sheet = None
         segment_beats = None
         segment_beats_times = None
         beats_per_measure = downbeats[1] - downbeats[0]  # TODO: It's just a workaround
         segment_start_downbeat = downbeats[0]
         segment_end_beat = downbeats[-1]
-
-    status_change_callback(Status.FORMATTING)
-    total_num_tertiary = sum([c.shape[0] for c in chunks_features])
-    lead_sheet, segment_beats, segment_beats_times = _format_lead_sheet(
-        melody_logits,
-        harmony_logits,
-        beats_per_measure,
-        beats,
-        beats_times,
-        segment_start_downbeat,
-        segment_end_beat,
-        total_num_tertiary,
-        melody_threshold=melody_threshold,
-        harmony_threshold=harmony_threshold,
-    )
+    else:
+        # TODO: Implement original behavior for dynamic chunking
+        status_change_callback(Status.FORMATTING)
+        total_num_tertiary = sum([c.shape[0] for c in chunks_features])
+        lead_sheet, segment_beats, segment_beats_times = _format_lead_sheet(
+            melody_logits,
+            harmony_logits,
+            beats_per_measure,
+            beats,
+            beats_times,
+            segment_start_downbeat,
+            segment_end_beat,
+            total_num_tertiary,
+            melody_threshold=melody_threshold,
+            harmony_threshold=harmony_threshold,
+        )
 
     melody_last_hidden_state = np.concatenate(melody_last_hidden_state, axis=0)
     harmony_last_hidden_state = np.concatenate(harmony_last_hidden_state, axis=0)
