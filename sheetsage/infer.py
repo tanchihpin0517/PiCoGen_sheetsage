@@ -537,6 +537,15 @@ def _transcribe_chunks(chunks_features, input_feats, detect_melody, detect_harmo
     if detect_harmony:
         assert sum([c.shape[0] for c in harmony_logits]) == total_num_tertiary
 
+    melody_last_hidden_state = np.concatenate(melody_last_hidden_state, axis=0)
+    harmony_last_hidden_state = np.concatenate(harmony_last_hidden_state, axis=0)
+
+    assert len(melody_last_hidden_state.shape) == 3
+    assert len(harmony_last_hidden_state.shape) == 3
+
+    melody_last_hidden_state = melody_last_hidden_state[:, 0, :]
+    harmony_last_hidden_state = harmony_last_hidden_state[:, 0, :]
+
     return (
         melody_logits,
         harmony_logits,
@@ -886,9 +895,6 @@ def sheetsage(
             melody_threshold=melody_threshold,
             harmony_threshold=harmony_threshold,
         )
-
-    melody_last_hidden_state = np.concatenate(melody_last_hidden_state, axis=0)
-    harmony_last_hidden_state = np.concatenate(harmony_last_hidden_state, axis=0)
 
     status_change_callback(Status.DONE)
 
