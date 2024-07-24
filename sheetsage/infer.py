@@ -514,22 +514,29 @@ def _transcribe_chunks(chunks_features, input_feats, detect_melody, detect_harmo
 
                 if detect_melody:
                     melody_output = melody_model(src, src_len, None, None)
-                    melody_output["logits"] = melody_output["logits"][
-                        : src_len.item(), 0
-                    ]
-                    melody_logits.append(melody_output["logits"].cpu().numpy())
-                    melody_last_hidden_state.append(
-                        melody_output["last_hidden_state"].cpu().numpy()
+                    logits, state = (
+                        melody_output["logits"],
+                        melody_output["last_hidden_state"],
                     )
+
+                    logits = logits[: src_len.item(), 0]
+                    state = state[: src_len.item(), 0]
+
+                    melody_logits.append(logits.cpu().numpy())
+                    melody_last_hidden_state.append(state.cpu().numpy())
+
                 if detect_harmony:
                     harmony_output = harmony_model(src, src_len, None, None)
-                    harmony_output["logits"] = harmony_output["logits"][
-                        : src_len.item(), 0
-                    ]
-                    harmony_logits.append(harmony_output["logits"].cpu().numpy())
-                    harmony_last_hidden_state.append(
-                        harmony_output["last_hidden_state"].cpu().numpy()
+                    logits, state = (
+                        harmony_output["logits"],
+                        harmony_output["last_hidden_state"],
                     )
+
+                    logits = logits[: src_len.item(), 0]
+                    state = state[: src_len.item(), 0]
+
+                    harmony_logits.append(logits.cpu().numpy())
+                    harmony_last_hidden_state.append(state.cpu().numpy())
 
     total_num_tertiary = sum([c.shape[0] for c in chunks_features])
     if detect_melody:
@@ -540,11 +547,8 @@ def _transcribe_chunks(chunks_features, input_feats, detect_melody, detect_harmo
     melody_last_hidden_state = np.concatenate(melody_last_hidden_state, axis=0)
     harmony_last_hidden_state = np.concatenate(harmony_last_hidden_state, axis=0)
 
-    assert len(melody_last_hidden_state.shape) == 3
-    assert len(harmony_last_hidden_state.shape) == 3
-
-    melody_last_hidden_state = melody_last_hidden_state[:, 0, :]
-    harmony_last_hidden_state = harmony_last_hidden_state[:, 0, :]
+    assert len(melody_last_hidden_state.shape) == 2
+    assert len(harmony_last_hidden_state.shape) == 2
 
     return (
         melody_logits,
