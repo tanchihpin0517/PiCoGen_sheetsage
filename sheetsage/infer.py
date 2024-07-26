@@ -142,7 +142,9 @@ def _init_model(task, input_feats, model):
     model.to(device)
     model.load_state_dict(
         torch.load(
-            retrieve_asset(f"{asset_prefix}_MODEL", log=False), map_location=device
+            retrieve_asset(f"{asset_prefix}_MODEL", log=False),
+            map_location=device,
+            weights_only=False,
         )
     )
     model.eval()
@@ -454,7 +456,7 @@ def _extract_features(
             f.flush()
             audio_path = f.name
         else:
-            audio_path = audio_path_or_bytes
+            audio_path = str(audio_path_or_bytes)
 
         for chunk_slice in tqdm(chunks_tertiaries):
             chunk_tertiaries_times = tertiaries_times[chunk_slice]
